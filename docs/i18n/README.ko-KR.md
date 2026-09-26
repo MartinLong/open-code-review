@@ -105,6 +105,7 @@ agent의 강점은 동적 판단과 동적 context 검색이 중요한 지점에
 ### 사전 요구 사항
 
 - **Git >= 2.41** — Open Code Review는 diff 생성, 코드 검색, 저장소 작업에 Git을 사용합니다.
+- **Subversion (svn) CLI** — Git 저장소 대신 SVN 작업 사본을 리뷰할 때만 필요합니다.
 
 ### CLI
 
@@ -166,6 +167,25 @@ ocr review --format json --output result.json
 ocr delegate preview
 ocr delegate rule src/main.go src/handler.go
 ```
+
+#### SVN 작업 사본
+
+`ocr review`는 Apache Subversion 작업 사본에서도 동작합니다. 버전 관리 백엔드는 자동으로 감지되며(둘 다 있으면 Git 우선), `--vcs auto|git|svn`으로 감지를 재정의할 수 있습니다.
+
+```bash
+cd your-svn-working-copy
+
+# 워크스페이스 모드 — 커밋되지 않은 변경 사항(버전 관리에 없는 파일 포함) 리뷰
+ocr review
+
+# 단일 리비전 — r1234에서 도입된 변경(r1233:r1234로 diff)
+ocr review --commit 1234
+
+# 리비전 범위 — 정확한 r1200:r1234 diff(SVN에는 merge-base가 없음)
+ocr review --from 1200 --to 1234
+```
+
+리비전은 숫자 또는 `HEAD`, `BASE`, `COMMITTED`, `PREV` 키워드를 사용합니다. 날짜 리비전(`{...}`)은 허용되지 않습니다. SVN에서는 `code_search` 도구가 작업 트리만 검색하며 특정 리비전 검색은 지원하지 않습니다.
 
 ## Documentation
 

@@ -16,6 +16,8 @@ import (
 
 	"github.com/alibaba/open-code-review/internal/gitcmd"
 	"github.com/alibaba/open-code-review/internal/pathutil"
+	"github.com/alibaba/open-code-review/internal/svncmd"
+	"github.com/alibaba/open-code-review/internal/vcs"
 )
 
 // ReviewMode represents the active review mode.
@@ -60,8 +62,10 @@ type FileReader struct {
 	Mode    ReviewMode
 	// Ref is the git ref to use for ModeRange (--to) or ModeCommit (--commit).
 	// Empty for ModeWorkspace.
-	Ref    string
-	Runner *gitcmd.Runner
+	Ref       string
+	Runner    *gitcmd.Runner
+	VCS       vcs.Kind
+	SVNRunner *svncmd.Runner
 }
 
 // Read returns the full content of a file path (relative to RepoDir),
@@ -73,6 +77,9 @@ func (fr *FileReader) Read(ctx context.Context, path string) (string, error) {
 	case ModeWorkspace:
 		return fr.readFromDisk(path)
 	case ModeRange, ModeCommit:
+		if fr.VCS == vcs.SVN {
+			return fr.readFromSVNCat(ctx, path)
+		}
 		return fr.readFromGitShow(ctx, path)
 	default:
 		return fr.readFromDisk(path)
@@ -137,6 +144,35 @@ func (fr *FileReader) readFromGitShow(parentCtx context.Context, path string) (s
 	return string(output), nil
 }
 
+func (fr *FileReader) readFromSVNCat(parentCtx context.Context, path string) (string, error) {
+	if strings.HasPrefix(fr.Ref, "-") || strings.HasPrefix(path, "-") {
+		return "", fmt.Errorf("invalid svn revision or path for svn cat")
+	}
+
+	ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
+	defer cancel()
+
+	// A trailing "@" pins an empty peg revision; without it svn parses an
+	// "@" inside the file name (icon@2x.png, @scope/pkg) as a peg revision
+	// and fails with E200004.
+	args := []string{"cat", "-r", fr.Ref, "--", path + "@"}
+	if fr.SVNRunner != nil {
+		output, err := fr.SVNRunner.Output(ctx, fr.RepoDir, args...)
+		if err != nil {
+			return "", fmt.Errorf("svn cat -r %s %s: %w", fr.Ref, path, err)
+		}
+		return string(output), nil
+	}
+
+	cmd := exec.CommandContext(ctx, "svn", args...)
+	cmd.Dir = fr.RepoDir
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("svn cat -r %s %s: %w", fr.Ref, path, err)
+	}
+	return string(output), nil
+}
+
 // ReadLines returns a window of lines from the file plus the total line count.
 // startLine is 1-based; maxLines is the maximum number of lines to collect.
 func (fr *FileReader) ReadLines(ctx context.Context, path string, startLine, maxLines int) ([]string, int, error) {
@@ -144,12 +180,23 @@ func (fr *FileReader) ReadLines(ctx context.Context, path string, startLine, max
 	case ModeWorkspace:
 		return fr.readLinesFromDisk(path, startLine, maxLines)
 	case ModeRange, ModeCommit:
+		if fr.VCS == vcs.SVN {
+			return fr.readLinesFromSVNCat(ctx, path, startLine, maxLines)
+		}
 		innerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		return fr.readLinesFromGitShow(innerCtx, path, startLine, maxLines)
 	default:
 		return fr.readLinesFromDisk(path, startLine, maxLines)
 	}
+}
+
+func (fr *FileReader) readLinesFromSVNCat(ctx context.Context, path string, startLine, maxLines int) ([]string, int, error) {
+	content, err := fr.readFromSVNCat(ctx, path)
+	if err != nil {
+		return nil, 0, err
+	}
+	return scanLines(strings.NewReader(content), startLine, maxLines)
 }
 
 // scanLines reads from r line by line, collecting at most maxLines lines

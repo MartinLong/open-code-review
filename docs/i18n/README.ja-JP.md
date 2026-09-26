@@ -105,6 +105,7 @@ Open Code Reviewのコア哲学は、決定論的エンジニアリングとエ�
 ### 前提条件
 
 - **Git >= 2.41** — Open Code Review は diff 生成、コード検索、リポジトリ操作に Git を利用します。
+- **Subversion (svn) CLI** — Git リポジトリの代わりに SVN ワーキングコピーをレビューする場合のみ必要です。
 
 ### CLI
 
@@ -166,6 +167,25 @@ ocr review --format json --output result.json
 ocr delegate preview
 ocr delegate rule src/main.go src/handler.go
 ```
+
+#### SVN ワーキングコピー
+
+`ocr review` は Apache Subversion ワーキングコピーでも動作します。バージョン管理バックエンドは自動検出されます（両方存在する場合は Git が優先）。`--vcs auto|git|svn` で検出を上書きできます。
+
+```bash
+cd your-svn-working-copy
+
+# ワークスペースモード — 未コミットの変更（バージョン管理外のファイルを含む）をレビュー
+ocr review
+
+# 単一リビジョン — r1234 で導入された変更（r1233:r1234 として diff）
+ocr review --commit 1234
+
+# リビジョン範囲 — 正確な r1200:r1234 の diff（SVN に merge-base はありません）
+ocr review --from 1200 --to 1234
+```
+
+リビジョンは数値またはキーワード `HEAD`、`BASE`、`COMMITTED`、`PREV` を指定できます。日付リビジョン（`{...}`）は受け付けません。SVN では `code_search` ツールはワークスペースのみを検索し、特定リビジョンでの検索はサポートされません。
 
 ## ドキュメント
 

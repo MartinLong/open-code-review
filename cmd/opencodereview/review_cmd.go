@@ -21,6 +21,7 @@ import (
 	"github.com/alibaba/open-code-review/internal/session"
 	"github.com/alibaba/open-code-review/internal/telemetry"
 	"github.com/alibaba/open-code-review/internal/tool"
+	"github.com/alibaba/open-code-review/internal/vcs"
 	"github.com/spf13/cobra"
 
 	"go.opentelemetry.io/otel/codes"
@@ -49,6 +50,7 @@ type reviewOptions struct {
 	maxTokens             int
 	maxTokensBudget       int
 	effort                string
+	vcs                   string
 	noFilter              bool
 	preview               bool
 }
@@ -134,14 +136,14 @@ func executeReviewContext(ctx context.Context, opts reviewOptions) (retErr error
 	}()
 
 	contentRef, _ := tool.ParseReviewMode(opts.from, opts.to, opts.commit).RefValue(opts.to, opts.commit)
-	cc, err := loadCommonContext(opts.repoDir, opts.rulePath, contentRef, opts.maxTools, opts.maxGitProcs, true)
+	cc, err := loadCommonContext(opts.repoDir, opts.rulePath, contentRef, opts.maxTools, opts.maxGitProcs, true, opts.vcs)
 	if err != nil {
 		return err
 	}
 	applyCLIExcludes(cc, splitPaths(opts.excludes))
 
 	// Security (#112): reject ref-option injection before any git invocation.
-	if err := validateReviewRefs(cc.RepoDir, opts); err != nil {
+	if err := validateReviewRefsForVCS(cc, opts); err != nil {
 		return err
 	}
 
@@ -199,10 +201,12 @@ func executeReviewContext(ctx context.Context, opts reviewOptions) (retErr error
 
 	mode := tool.ParseReviewMode(opts.from, opts.to, opts.commit)
 	fileReader := &tool.FileReader{
-		RepoDir: cc.RepoDir,
-		Mode:    mode,
-		Ref:     fileReadRef(mode, opts, sealedInput),
-		Runner:  cc.GitRunner,
+		RepoDir:   cc.RepoDir,
+		Mode:      mode,
+		Ref:       fileReadRef(mode, opts, sealedInput),
+		Runner:    cc.GitRunner,
+		VCS:       cc.VCS,
+		SVNRunner: cc.SVNRunner,
 	}
 	tools := buildToolRegistry(rt.Collector, fileReader)
 
@@ -235,6 +239,8 @@ func executeReviewContext(ctx context.Context, opts reviewOptions) (retErr error
 		EndpointSource:        rt.Source,
 		Background:            opts.background,
 		GitRunner:             cc.GitRunner,
+		VCS:                   cc.VCS,
+		SVNRunner:             cc.SVNRunner,
 		Resume:                resumeState,
 		SealedInput:           sealedInput,
 		MaxTokensBudget:       int64(opts.maxTokensBudget),
@@ -406,6 +412,8 @@ func validateResumeIdentity(ctx context.Context, cc *commonContext, opts reviewO
 		SystemRule: cc.Resolver,
 		FileFilter: cc.FileFilter,
 		GitRunner:  cc.GitRunner,
+		VCS:        cc.VCS,
+		SVNRunner:  cc.SVNRunner,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("resolve current input identity: %w", err)
@@ -501,6 +509,33 @@ func validateReviewRefs(repoDir string, opts reviewOptions) error {
 	return nil
 }
 
+// validateReviewRefsForVCS dispatches ref validation by backend: git refs
+// are verified against the object store, while SVN accepts revision numbers
+// and the HEAD/BASE/COMMITTED/PREV keywords (validated syntactically;
+// existence is checked by svn itself when the diff is produced).
+func validateReviewRefsForVCS(cc *commonContext, opts reviewOptions) error {
+	if cc.VCS != vcs.SVN {
+		return validateReviewRefs(cc.RepoDir, opts)
+	}
+	refs := []struct {
+		flag string
+		ref  string
+	}{
+		{"--from", opts.from},
+		{"--to", opts.to},
+		{"--commit", opts.commit},
+	}
+	for _, item := range refs {
+		if item.ref == "" {
+			continue
+		}
+		if !diff.IsValidSVNRevision(item.ref) {
+			return fmt.Errorf("%s value %q is not a valid SVN revision: use a revision number or one of HEAD, BASE, COMMITTED, PREV", item.flag, item.ref)
+		}
+	}
+	return nil
+}
+
 func runPreviewContext(ctx context.Context, cc *commonContext, opts reviewOptions, out io.Writer) error {
 	maxTokens, err := previewMaxTokens(cc.Template.MaxTokens, opts.maxTokens)
 	if err != nil {
@@ -519,6 +554,8 @@ func runPreviewContext(ctx context.Context, cc *commonContext, opts reviewOption
 		Template:   tpl,
 		FileFilter: cc.FileFilter,
 		GitRunner:  cc.GitRunner,
+		VCS:        cc.VCS,
+		SVNRunner:  cc.SVNRunner,
 	})
 	if err != nil {
 		return fmt.Errorf("preview failed: %w", err)

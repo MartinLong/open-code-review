@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/alibaba/open-code-review/internal/config/template"
+	"github.com/alibaba/open-code-review/internal/vcs"
 	"github.com/spf13/cobra"
 )
 
@@ -158,6 +159,9 @@ func validateReviewOptions(opts *reviewOptions) error {
 			return fmt.Errorf("--effort: %w", err)
 		}
 	}
+	if _, _, err := vcs.ParseFlag(opts.vcs); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -215,6 +219,8 @@ func registerReviewFlags(cmd *cobra.Command, opts *reviewOptions) {
 	addModelFlag(cmd, &opts.model)
 	cmd.Flags().StringVar(&opts.effort, "effort", "", "review effort preset: low | medium | high (\"\" = configured or default medium)")
 	cmd.RegisterFlagCompletionFunc("effort", completeEnum(template.EffortNames()...))
+	cmd.Flags().StringVar(&opts.vcs, "vcs", "auto", "version control system: auto | git | svn")
+	cmd.RegisterFlagCompletionFunc("vcs", completeEnum("auto", "git", "svn"))
 	cmd.Flags().BoolVar(&opts.noFilter, "no-filter", false, "keep all review comments without LLM post-filtering")
 	addPreviewFlag(cmd, &opts.preview)
 }

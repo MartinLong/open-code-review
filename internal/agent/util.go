@@ -154,6 +154,20 @@ func reviewModeString(from, to, commit string) string {
 	return session.ReviewModeWorkspace
 }
 
+// detectSVNBranch reports the working copy's repository-relative URL (for
+// example "branches/feature-x"), which is the closest SVN analogue of a git
+// branch. Returns an empty string on failure.
+func detectSVNBranch(ctx context.Context, wcDir string) string {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "svn", "info", "--show-item", "relative-url", "--", wcDir)
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return ""
+	}
+	return strings.TrimPrefix(strings.TrimSpace(string(out)), "^/")
+}
+
 // detectGitBranch returns the current git branch name for the given repo, or empty string on failure.
 func detectGitBranch(ctx context.Context, repoDir string) string {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

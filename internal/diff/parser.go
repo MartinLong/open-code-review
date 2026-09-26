@@ -56,12 +56,24 @@ func parseDiffHeaderLine(line string) (oldPath string, newPath string, ok bool) 
 	return parseQuotedDiffHeader(line)
 }
 
+// ContentReader reads the post-change content of a repo-relative path at the
+// diff's target ref. It lets non-git providers substitute their own "show
+// file at revision" command (svn cat) for the built-in git show.
+type ContentReader func(ctx context.Context, path string) (string, error)
+
 // ParseDiffText splits the unified diff text into per-file Diff structs.
 // ref, if non-empty, is a git ref used to read new-file content via
 // git show instead of reading from the working tree.
 // runner, if non-nil, is used to execute git subprocesses through a
 // shared concurrency limiter.
 func ParseDiffText(ctx context.Context, diffText string, repoDir string, ref string, runner *gitcmd.Runner) ([]model.Diff, error) {
+	return ParseDiffTextWithReader(ctx, diffText, repoDir, ref, runner, nil)
+}
+
+// ParseDiffTextWithReader behaves like ParseDiffText, but when ref is
+// non-empty and readAtRef is set it reads new-file content through readAtRef
+// instead of git show.
+func ParseDiffTextWithReader(ctx context.Context, diffText string, repoDir string, ref string, runner *gitcmd.Runner, readAtRef ContentReader) ([]model.Diff, error) {
 	lines := splitDiffLines(diffText)
 	var diffs []model.Diff
 	var current *model.Diff
@@ -82,7 +94,7 @@ func ParseDiffText(ctx context.Context, diffText string, repoDir string, ref str
 			// Flush previous diff
 			if current != nil {
 				current.Diff = strings.TrimSuffix(buf.String(), "\n")
-				finalizeDiff(ctx, current, repoDir, ref, runner)
+				finalizeDiff(ctx, current, repoDir, ref, runner, readAtRef)
 				diffs = append(diffs, *current)
 				buf.Reset()
 			}
@@ -139,7 +151,7 @@ func ParseDiffText(ctx context.Context, diffText string, repoDir string, ref str
 	// Flush last diff
 	if current != nil {
 		current.Diff = strings.TrimSuffix(buf.String(), "\n")
-		finalizeDiff(ctx, current, repoDir, ref, runner)
+		finalizeDiff(ctx, current, repoDir, ref, runner, readAtRef)
 		diffs = append(diffs, *current)
 	}
 
@@ -147,13 +159,24 @@ func ParseDiffText(ctx context.Context, diffText string, repoDir string, ref str
 }
 
 // finalizeDiff reads the new file content. When ref is non-empty it uses
-// git show to read the file at that ref; otherwise it reads from disk.
-func finalizeDiff(ctx context.Context, d *model.Diff, repoDir string, ref string, runner *gitcmd.Runner) {
+// readAtRef when given, or git show otherwise, to read the file at that ref;
+// otherwise it reads from disk.
+func finalizeDiff(ctx context.Context, d *model.Diff, repoDir string, ref string, runner *gitcmd.Runner, readAtRef ContentReader) {
 	if d.IsDeleted || d.NewPath == "/dev/null" {
 		d.NewPath = "/dev/null"
 		return
 	}
 	if d.IsBinary {
+		return
+	}
+	if ref != "" && readAtRef != nil {
+		content, err := readAtRef(ctx, d.NewPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[ocr] WARNING: cannot read file %s at ref %s: %v\n",
+				d.NewPath, ref, err)
+			return
+		}
+		d.NewFileContent = content
 		return
 	}
 	if ref != "" {

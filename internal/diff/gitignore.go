@@ -29,16 +29,14 @@ func ProviderDirPrefix(relPath string) string {
 // LoadGitignorePatterns reads and parses .gitignore patterns from the given
 // repository root. Returns nil if the file is missing or unreadable.
 func LoadGitignorePatterns(repoDir string) []string {
-	stub := &Provider{repoDir: repoDir}
-	return stub.loadGitignorePatterns()
+	return loadGitignorePatterns(repoDir)
 }
 
 // IsPathExcluded returns true when relPath matches any of the supplied
 // gitignore-style patterns or any default excluded directory prefix
 // (see ExcludedDirs).
 func IsPathExcluded(repoDir, relPath string, patterns []string) bool {
-	stub := &Provider{repoDir: repoDir}
-	return stub.isPathExcluded(relPath, patterns)
+	return isPathExcluded(relPath, patterns)
 }
 
 // MatchGitignorePattern reports whether relPath matches a single

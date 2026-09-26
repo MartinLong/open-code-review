@@ -105,6 +105,7 @@ The agent's strengths are concentrated where they matter most — dynamic decisi
 ### Prerequisites
 
 - **Git >= 2.41** — Open Code Review relies on Git for diff generation, code search, and repository operations.
+- **Subversion (svn) CLI** — required only when reviewing SVN working copies instead of Git repositories.
 
 ### CLI
 
@@ -166,6 +167,25 @@ ocr review --format json --output result.json
 ocr delegate preview
 ocr delegate rule src/main.go src/handler.go
 ```
+
+#### SVN Working Copies
+
+`ocr review` also works on Apache Subversion working copies. The version control backend is detected automatically (Git wins when both are present); use `--vcs auto|git|svn` to override detection.
+
+```bash
+cd your-svn-working-copy
+
+# Workspace mode — review uncommitted changes, including unversioned files
+ocr review
+
+# Single revision — the changes introduced by r1234 (diffed as r1233:r1234)
+ocr review --commit 1234
+
+# Revision range — the exact diff r1200:r1234 (SVN ranges have no merge-base)
+ocr review --from 1200 --to 1234
+```
+
+Revisions are numbers or the keywords `HEAD`, `BASE`, `COMMITTED`, `PREV`; date revisions (`{...}`) are not accepted. Under SVN the `code_search` tool searches the working tree only — searching at a specific revision is not supported.
 
 ## Documentation
 

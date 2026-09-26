@@ -27,8 +27,10 @@ import (
 	"github.com/alibaba/open-code-review/internal/model"
 	"github.com/alibaba/open-code-review/internal/session"
 	"github.com/alibaba/open-code-review/internal/stdout"
+	"github.com/alibaba/open-code-review/internal/svncmd"
 	"github.com/alibaba/open-code-review/internal/telemetry"
 	"github.com/alibaba/open-code-review/internal/tool"
+	"github.com/alibaba/open-code-review/internal/vcs"
 )
 
 // commonContext bundles the state that both `ocr review` and `ocr scan`
@@ -41,6 +43,9 @@ type commonContext struct {
 	Resolver   rules.Resolver
 	FileFilter *rules.FileFilter
 	GitRunner  *gitcmd.Runner
+	// VCS is the detected or forced version control backend for RepoDir.
+	VCS       vcs.Kind
+	SVNRunner *svncmd.Runner
 	// IsGitRepo reports whether RepoDir is inside a git repository. Always
 	// true when requireGit was set; may be false when scan accepts non-git
 	// directories.
@@ -105,10 +110,10 @@ func previewMaxTokens(templateDefault, cliOverride int) (int, error) {
 // directories (scan path: provider falls back to filepath.Walk).
 //
 // contentRef is the git ref whose file content the rule resolver should
-// inspect when disambiguating ambiguous extensions — derive it via
+// inspect when disambiguating ambiguous extensions ??derive it via
 // tool.ParseReviewMode(from, to, commit).RefValue(to, commit). Pass "" to
 // read the working tree, which is what scan wants.
-func loadCommonContext(repoDirInput, rulePath, contentRef string, maxTools, maxGitProcs int, requireGit bool) (*commonContext, error) {
+func loadCommonContext(repoDirInput, rulePath, contentRef string, maxTools, maxGitProcs int, requireGit bool, vcsFlag string) (*commonContext, error) {
 	tpl, err := template.LoadDefault()
 	if err != nil {
 		return nil, fmt.Errorf("load default template: %w", err)
@@ -120,9 +125,18 @@ func loadCommonContext(repoDirInput, rulePath, contentRef string, maxTools, maxG
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
-	repoDir, isGit, err := resolveWorkingDir(repoDirInput, requireGit)
+	repoDir, vcsKind, detected, err := resolveWorkingDirVCS(repoDirInput, requireGit, vcsFlag)
 	if err != nil {
 		return nil, err
+	}
+	isGit := detected && vcsKind == vcs.Git
+	if vcsKind == vcs.SVN {
+		// The rule resolver sniffs file content at a ref via git show; SVN
+		// working copies read the working tree instead.
+		if contentRef != "" {
+			fmt.Fprintf(os.Stderr, "[ocr] WARNING: rule sniffing reads the working tree; content ref %q is ignored for SVN\n", contentRef)
+		}
+		contentRef = ""
 	}
 
 	// Built before the resolver: the sniffer reads file content at contentRef
@@ -143,53 +157,99 @@ func loadCommonContext(repoDirInput, rulePath, contentRef string, maxTools, maxG
 		Resolver:   resolver,
 		FileFilter: fileFilter,
 		GitRunner:  gitRunner,
+		VCS:        vcsKind,
+		SVNRunner:  svncmd.New(maxGitProcs),
 		IsGitRepo:  isGit,
 	}, nil
 }
 
 // resolveWorkingDir returns (absPath, isGitRepo, err). When requireGit is
-// true, returns an error if the directory is not a git repo. When false,
-// returns IsGitRepo=false instead of erroring (scan path uses this).
+// true, returns an error if the directory is not a git repo or SVN working
+// copy. When false, returns IsGitRepo=false instead of erroring (scan path
+// uses this).
 func resolveWorkingDir(input string, requireGit bool) (string, bool, error) {
+	absPath, kind, detected, err := resolveWorkingDirVCS(input, requireGit, "auto")
+	if err != nil {
+		return "", false, err
+	}
+	return absPath, detected && kind == vcs.Git, nil
+}
+
+// resolveWorkingDirVCS returns (absPath, vcsKind, detected, err). vcsFlag is
+// "auto", "git" or "svn": auto probes git first, then SVN; a forced kind
+// probes only that system. When requireVCS is true, an undetected (or
+// mismatched) directory is an error and a detected directory is anchored at
+// the repository root; otherwise detection failure is not an error and the
+// directory is returned as given.
+func resolveWorkingDirVCS(input string, requireVCS bool, vcsFlag string) (string, vcs.Kind, bool, error) {
+	kind, auto, err := vcs.ParseFlag(vcsFlag)
+	if err != nil {
+		return "", 0, false, err
+	}
 	if input == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return "", false, fmt.Errorf("get working directory: %w", err)
+			return "", 0, false, fmt.Errorf("get working directory: %w", err)
 		}
 		input = wd
 	}
 	absPath, err := filepath.Abs(input)
 	if err != nil {
-		return "", false, fmt.Errorf("resolve absolute path: %w", err)
+		return "", 0, false, fmt.Errorf("resolve absolute path: %w", err)
 	}
 	if _, statErr := os.Stat(absPath); statErr != nil {
-		return "", false, fmt.Errorf("stat %s: %w", absPath, statErr)
+		return "", 0, false, fmt.Errorf("stat %s: %w", absPath, statErr)
 	}
-	out, err := runGitCmd(absPath, "rev-parse", "--git-dir")
-	isGit := err == nil && len(out) > 0
-	if !isGit && requireGit {
-		return "", false, fmt.Errorf("%s is not a git repository", absPath)
-	}
-	// #287: git reports diff and `git show HEAD:<path>` paths relative to the
-	// repository root, not the current directory. When `ocr review` runs from a
-	// subdirectory of a monorepo, anchor RepoDir at the git top-level so those
-	// root-relative paths resolve for both disk reads and git-show reads.
-	// requireGit is true only for the review path; scan (requireGit=false) keeps
-	// the CWD so its `git ls-files` walk stays scoped to the subdirectory.
-	if isGit && requireGit {
-		// runGitCmdStdout captures stdout only so git stderr notices can't
-		// pollute the resolved path. --show-toplevel fails (or is empty) when
-		// there is no work tree — e.g. a bare repo, where --git-dir succeeds so
-		// isGit is true. Fail loudly there instead of silently reusing the
-		// subdir, which would reproduce the #287 root-relative-path bug.
-		top, topErr := runGitCmdStdout(absPath, "rev-parse", "--show-toplevel")
-		t := strings.TrimSpace(string(top))
-		if topErr != nil || t == "" {
-			return "", false, fmt.Errorf("%s is a git repository without a work tree (bare repo?); cannot resolve its top level for review", absPath)
+
+	if auto || kind == vcs.Git {
+		out, gitErr := runGitCmd(absPath, "rev-parse", "--git-dir")
+		if gitErr == nil && len(out) > 0 {
+			// #287: git reports diff and `git show HEAD:<path>` paths relative
+			// to the repository root, not the current directory. When
+			// `ocr review` runs from a subdirectory of a monorepo, anchor
+			// RepoDir at the git top-level so those root-relative paths
+			// resolve for both disk reads and git-show reads. requireVCS is
+			// true only for the review path; scan keeps the CWD so its
+			// `git ls-files` walk stays scoped to the subdirectory.
+			if requireVCS {
+				// runGitCmdStdout captures stdout only so git stderr notices
+				// can't pollute the resolved path. --show-toplevel fails (or
+				// is empty) when there is no work tree, e.g. a bare repo,
+				// where --git-dir succeeds. Fail loudly there instead of
+				// silently reusing the subdir, which would reproduce the #287
+				// root-relative-path bug.
+				top, topErr := runGitCmdStdout(absPath, "rev-parse", "--show-toplevel")
+				t := strings.TrimSpace(string(top))
+				if topErr != nil || t == "" {
+					return "", 0, false, fmt.Errorf("%s is a git repository without a work tree (bare repo?); cannot resolve its top level for review", absPath)
+				}
+				absPath = t
+			}
+			return absPath, vcs.Git, true, nil
 		}
-		absPath = t
+		if !auto && requireVCS {
+			return "", 0, false, fmt.Errorf("%s is not a git repository", absPath)
+		}
 	}
-	return absPath, isGit, nil
+
+	if auto || kind == vcs.SVN {
+		if root := vcs.SVNWorkingCopyRoot(absPath); root != "" {
+			// svn diffs report paths relative to the working copy root, so
+			// anchor there for the review path, like the git top-level above.
+			if requireVCS {
+				absPath = root
+			}
+			return absPath, vcs.SVN, true, nil
+		}
+		if !auto && requireVCS {
+			return "", 0, false, fmt.Errorf("%s is not an SVN working copy", absPath)
+		}
+	}
+
+	if requireVCS {
+		return "", 0, false, fmt.Errorf("%s is not a git repository or an SVN working copy", absPath)
+	}
+	return absPath, vcs.Git, false, nil
 }
 
 // llmRuntime bundles the LLM-side state both subcommands need once they've
@@ -232,7 +292,7 @@ var newRetryCollector = llm.NewRetryCollector
 
 // loadLLMRuntime loads tool defs from toolConfigPath, reads the app config
 // from the user's default config path (applying the configured language to
-// tpl — defaulting when the config file is absent), resolves the LLM
+// tpl ??defaulting when the config file is absent), resolves the LLM
 // endpoint (honoring resolveOpts), and
 // returns the runtime bundle. tpl is mutated in place.
 func loadLLMRuntime(tpl *template.Template, toolConfigPath string, resolveOpts llm.ResolveOptions) (*llmRuntime, error) {
@@ -447,7 +507,7 @@ type stripAnsiWriter struct {
 
 func (w *stripAnsiWriter) Write(p []byte) (int, error) {
 	// Only new bytes are fed to the state machine. w.pending holds bytes that
-	// already entered an escape sequence in earlier calls — re-feeding them
+	// already entered an escape sequence in earlier calls ??re-feeding them
 	// would re-parse the sequence start (e.g. '[' would be mistaken for a CSI
 	// final byte once the state is already ansiCSI) and leak the sequence into
 	// the output. The pending buffer is discarded wholesale on completion.
@@ -679,8 +739,7 @@ func (w *lazyFileWriter) Write(p []byte) (int, error) {
 // Err returns the first error encountered while creating or writing the
 // underlying file, or nil if none occurred. Text-mode rendering drops the
 // per-write errors of fmt.Fprintf, so callers use this to surface write
-// failures (e.g. permission denied on the first write) as a command error —
-// matching JSON mode, where Encoder.Encode propagates the same failure.
+// failures (e.g. permission denied on the first write) as a command error ??// matching JSON mode, where Encoder.Encode propagates the same failure.
 func (w *lazyFileWriter) Err() error {
 	if w.err != nil {
 		return w.err
@@ -741,8 +800,8 @@ func (w *lazyFileWriter) Close() error {
 
 // resolveOutputWriter resolves the --output target into a writer plus a
 // cleanup function.
-//   - "" or "-"      → os.Stdout with a no-op cleanup (colors preserved, no hint)
-//   - otherwise      → a lazyFileWriter over a same-directory temporary file,
+//   - "" or "-"      ??os.Stdout with a no-op cleanup (colors preserved, no hint)
+//   - otherwise      ??a lazyFileWriter over a same-directory temporary file,
 //     deferred until the first Write and atomically committed by Close; text
 //     format wraps the file in stripAnsiWriter so ANSI colors never reach it.
 //
@@ -787,7 +846,7 @@ type ResultProvider interface {
 	// created.
 	SessionID() string
 	// BudgetExceeded reports whether the aggregate token budget gate stopped the
-	// run before all files were reviewed. It is a diagnostic signal only — it
+	// run before all files were reviewed. It is a diagnostic signal only ??it
 	// feeds summary.budget_exceeded and the failure usage record, and never
 	// decides the run's terminal state. The terminal state comes solely from the
 	// manifest's coverage: the stop marks the undispatched items
@@ -812,7 +871,7 @@ type resumeInfoProvider interface {
 // silencing was set up (in which case the early restore is a no-op).
 //
 // retryReport is the frozen LLM retry report, or nil when there is nothing to
-// report (a clean run, or a caller that produces no report at all — `ocr scan`
+// report (a clean run, or a caller that produces no report at all ??`ocr scan`
 // never freezes one). It is passed as a parameter rather than added to
 // ResultProvider because the collector belongs to llmRuntime, not to the
 // agent; putting it on the interface would force internal/scan.Agent to
@@ -894,7 +953,7 @@ func emitRunResult(
 	// after them but must not separate the summary from the end of output.
 	outputRetryReportText(out, retryReport)
 	if summary := ag.ProjectSummary(); summary != "" {
-		fmt.Fprintf(out, "\n\n──────── Project Summary ────────\n\n%s\n", sanitizeTerminal(summary))
+		fmt.Fprintf(out, "\n\n???????????????? Project Summary ????????????????\n\n%s\n", sanitizeTerminal(summary))
 	}
 	// Text rendering ignores fmt.Fprintf write errors; surface them here so a
 	// failed --output write (permission, disk full) fails the command non-zero

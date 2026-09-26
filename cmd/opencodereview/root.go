@@ -6,7 +6,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
+	"strings"
 
 	"github.com/alibaba/open-code-review/internal/gitcmd"
 	"github.com/spf13/cobra"
@@ -30,7 +32,12 @@ configurable LLM service, and generates review comments.`,
 			return err
 		}
 		colorEnabled = resolveColor()
-		if !commandNeedsGit(cmd) {
+		if !commandNeedsGit(cmd) || reviewRunsOnSVN(cmd) {
+			return nil
+		}
+		if _, err := exec.LookPath("git"); err != nil {
+			// Without a git binary the version check can only fail; git-mode
+			// runs report the same problem when they invoke git themselves.
 			return nil
 		}
 		if err := gitcmd.CheckGitVersion(); err != nil {
@@ -63,6 +70,16 @@ func init() {
 	rootCmd.AddCommand(rulesCmd)
 	rootCmd.AddCommand(viewerCmd)
 	rootCmd.AddCommand(completionCmd)
+}
+
+// reviewRunsOnSVN reports whether this invocation was pinned to SVN via
+// --vcs=svn, in which case the git version check is irrelevant.
+func reviewRunsOnSVN(cmd *cobra.Command) bool {
+	f := cmd.Flags().Lookup("vcs")
+	if f == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(f.Value.String()), "svn")
 }
 
 func commandNeedsGit(cmd *cobra.Command) bool {

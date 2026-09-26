@@ -105,6 +105,7 @@ Open Code Review 的核心设计理念是将确定性工程与 Agent 结合，�
 ### 前置条件
 
 - **Git >= 2.41** — Open Code Review 依赖 Git 进行 diff 生成、代码搜索和仓库操作。
+- **Subversion (svn) CLI** — 仅在审查 SVN 工作副本（而非 Git 仓库）时需要。
 
 ### CLI
 
@@ -166,6 +167,25 @@ ocr review --format json --output result.json
 ocr delegate preview
 ocr delegate rule src/main.go src/handler.go
 ```
+
+#### SVN 工作副本
+
+`ocr review` 也支持 Apache Subversion 工作副本。版本管理后端会自动检测（两者同时存在时优先 Git）；可用 `--vcs auto|git|svn` 覆盖检测。
+
+```bash
+cd your-svn-working-copy
+
+# 工作区模式 — 审查未提交的修改（包括未纳入版本控制的文件）
+ocr review
+
+# 单版本 — r1234 引入的修改（按 r1233:r1234 做 diff）
+ocr review --commit 1234
+
+# 版本区间 — 精确的 r1200:r1234 diff（SVN 没有 merge-base 概念）
+ocr review --from 1200 --to 1234
+```
+
+版本号可以是数字或关键字 `HEAD`、`BASE`、`COMMITTED`、`PREV`；不接受日期版本（`{...}`）。SVN 模式下 `code_search` 工具只搜索工作区，不支持按指定版本搜索。
 
 ## 文档
 
