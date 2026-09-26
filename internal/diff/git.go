@@ -280,8 +280,8 @@ func (p *Provider) GetDiffSet(ctx context.Context) (DiffSet, error) {
 }
 
 // loadGitignorePatterns reads and parses .gitignore patterns from the repo root.
-func (p *Provider) loadGitignorePatterns() []string {
-	data, err := os.ReadFile(filepath.Join(p.repoDir, ".gitignore"))
+func loadGitignorePatterns(repoDir string) []string {
+	data, err := os.ReadFile(filepath.Join(repoDir, ".gitignore"))
 	if err != nil {
 		return nil
 	}
@@ -305,7 +305,7 @@ func (p *Provider) loadGitignorePatterns() []string {
 // re-include with `!` lines — github/gitignore ships one per language) is only
 // correct under last-match-wins. Treating negations as unmatchable made every
 // file in such a repository look excluded, so a review silently covered nothing.
-func (p *Provider) isPathExcluded(relPath string, gitignorePatterns []string) bool {
+func isPathExcluded(relPath string, gitignorePatterns []string) bool {
 	if isProviderDirExcluded(relPath) {
 		return true
 	}
@@ -433,7 +433,13 @@ func matchGitignoreDirectory(relPath, pattern string) bool {
 // partitionDiffs keeps diffs filtered by built-in directory rules available
 // for reporting while preserving the review input as the Included slice.
 func (p *Provider) partitionDiffs(diffs []model.Diff) DiffSet {
-	patterns := p.loadGitignorePatterns()
+	return partitionDiffs(p.repoDir, diffs)
+}
+
+// partitionDiffs is the provider-agnostic implementation, shared with the
+// SVN provider.
+func partitionDiffs(repoDir string, diffs []model.Diff) DiffSet {
+	patterns := loadGitignorePatterns(repoDir)
 	result := DiffSet{
 		Included: make([]model.Diff, 0, len(diffs)),
 		Excluded: make([]model.Diff, 0),
@@ -446,7 +452,7 @@ func (p *Provider) partitionDiffs(diffs []model.Diff) DiffSet {
 		if isProviderDirExcluded(path) {
 			result.excludedAt = append(result.excludedAt, len(result.Included)+len(result.Excluded))
 			result.Excluded = append(result.Excluded, d)
-		} else if !p.isPathExcluded(path, patterns) {
+		} else if !isPathExcluded(path, patterns) {
 			result.Included = append(result.Included, d)
 		}
 	}
@@ -657,10 +663,18 @@ func (p *Provider) untrackedFileDiffs(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return synthesizeNewFileDiffs(p.repoDir, files), nil
+}
 
+// synthesizeNewFileDiffs renders each listed file (relative to repoDir) as a
+// git-style new-file diff. Binary or oversized files get git's binary marker
+// so the selection layer excludes them, matching how git reports binary
+// files. Shared with the SVN provider, whose unversioned files play the same
+// role as untracked files in git.
+func synthesizeNewFileDiffs(repoDir string, files []string) []string {
 	var results []string
 	for _, f := range files {
-		content, rerr := readWorkspaceFileForDiffWithLimit(p.repoDir, f, maxUntrackedFileSize)
+		content, rerr := readWorkspaceFileForDiffWithLimit(repoDir, f, maxUntrackedFileSize)
 		if errors.Is(rerr, errWorkspaceFileTooLarge) {
 			results = append(results, untrackedBinaryDiff(f))
 			continue
@@ -699,7 +713,7 @@ func (p *Provider) untrackedFileDiffs(ctx context.Context) ([]string, error) {
 		}
 		results = append(results, sb.String())
 	}
-	return results, nil
+	return results
 }
 
 func (p *Provider) untrackedFilesList(ctx context.Context) ([]string, error) {
@@ -716,13 +730,13 @@ func (p *Provider) untrackedFilesList(ctx context.Context) ([]string, error) {
 	if out == "" {
 		return nil, nil
 	}
-	patterns := p.loadGitignorePatterns()
+	patterns := loadGitignorePatterns(p.repoDir)
 	var files []string
 	for _, name := range strings.Split(strings.TrimRight(out, "\x00"), "\x00") {
 		if name == "" {
 			continue
 		}
-		if !p.isPathExcluded(name, patterns) {
+		if !isPathExcluded(name, patterns) {
 			files = append(files, name)
 		}
 	}

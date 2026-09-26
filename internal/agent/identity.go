@@ -12,6 +12,7 @@ import (
 	"github.com/alibaba/open-code-review/internal/diff"
 	"github.com/alibaba/open-code-review/internal/session"
 	"github.com/alibaba/open-code-review/internal/stdout"
+	"github.com/alibaba/open-code-review/internal/vcs"
 )
 
 // SealedInput is what a pre-flight resolve froze: the identity it computed, and
@@ -65,6 +66,9 @@ func ResolveIdentity(ctx context.Context, args Args) (*SealedInput, error) {
 // before the diff used for admission is loaded. Range mode then computes its
 // merge-base against that frozen head; commit mode needs only the frozen head.
 func resolveInputBeforeDiff(ctx context.Context, args Args) (*diff.InputResolution, error) {
+	if args.VCS == vcs.SVN {
+		return resolveSVNInputBeforeDiff(ctx, args)
+	}
 	switch {
 	case args.Commit != "":
 		head, err := resolveCommitHead(ctx, args, args.Commit)
@@ -84,6 +88,29 @@ func resolveInputBeforeDiff(ctx context.Context, args Args) (*diff.InputResoluti
 		resolved := diff.NewProvider(args.RepoDir, from, head, args.GitRunner).ResolveInput(ctx)
 		if resolved.ResolvedBase == "" {
 			return nil, fmt.Errorf("resolve merge-base between %q and %q", args.From, args.To)
+		}
+		return &resolved, nil
+	default:
+		return nil, nil
+	}
+}
+
+// resolveSVNInputBeforeDiff pins keyword revisions (HEAD, BASE, PREV) to
+// concrete revision numbers before the diff used for admission is loaded, so a
+// resume cannot silently review different content than the admitted identity
+// covered. SVN ranges are exact revisions with no merge-base step.
+func resolveSVNInputBeforeDiff(ctx context.Context, args Args) (*diff.InputResolution, error) {
+	switch {
+	case args.Commit != "":
+		head := diff.NewSVNCommitProvider(args.RepoDir, args.Commit, args.SVNRunner).ResolveInput(ctx).ResolvedHead
+		if head == "" {
+			return nil, fmt.Errorf("resolve svn revision %q", args.Commit)
+		}
+		return &diff.InputResolution{ResolvedHead: head}, nil
+	case args.From != "" && args.To != "":
+		resolved := diff.NewSVNProvider(args.RepoDir, args.From, args.To, args.SVNRunner).ResolveInput(ctx)
+		if resolved.ResolvedBase == "" || resolved.ResolvedHead == "" {
+			return nil, fmt.Errorf("resolve svn revisions %q and %q", args.From, args.To)
 		}
 		return &resolved, nil
 	default:

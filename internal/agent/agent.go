@@ -32,8 +32,10 @@ import (
 	"github.com/alibaba/open-code-review/internal/model"
 	"github.com/alibaba/open-code-review/internal/session"
 	"github.com/alibaba/open-code-review/internal/stdout"
+	"github.com/alibaba/open-code-review/internal/svncmd"
 	"github.com/alibaba/open-code-review/internal/telemetry"
 	"github.com/alibaba/open-code-review/internal/tool"
+	"github.com/alibaba/open-code-review/internal/vcs"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -134,6 +136,12 @@ type Args struct {
 	// When nil, subprocesses are spawned without a global limit.
 	GitRunner *gitcmd.Runner
 
+	// VCS selects the version control backend; the zero value is git.
+	VCS vcs.Kind
+
+	// SVNRunner limits concurrent svn subprocesses. Used when VCS is svn.
+	SVNRunner *svncmd.Runner
+
 	// Session is an optional session history instance for collecting conversation records.
 	// When nil, a default one is created automatically with git branch auto-detected from repoDir.
 	Session *session.SessionHistory
@@ -216,12 +224,15 @@ func New(args Args) *Agent {
 		args.CommentCollector = tool.NewCommentCollector()
 	}
 	if args.Session == nil {
-		gitBranch := detectGitBranch(context.Background(), args.RepoDir)
+		branch := detectGitBranch(context.Background(), args.RepoDir)
+		if args.VCS == vcs.SVN {
+			branch = detectSVNBranch(context.Background(), args.RepoDir)
+		}
 		mode := args.ReviewMode
 		if mode == "" {
 			mode = reviewModeString(args.From, args.To, args.Commit)
 		}
-		args.Session = session.New(args.RepoDir, gitBranch, args.Model, session.SessionOptions{
+		args.Session = session.New(args.RepoDir, branch, args.Model, session.SessionOptions{
 			ReviewMode:  mode,
 			DiffFrom:    args.From,
 			DiffTo:      args.To,
@@ -551,7 +562,7 @@ func (a *Agent) recordWarning(warningType, file, message string) {
 }
 
 // newDiffProvider resolves the configured input to a diff provider.
-func (a *Agent) newDiffProvider() *diff.Provider {
+func (a *Agent) newDiffProvider() diff.Source {
 	// A sealed input substitutes the commit SHAs a pre-flight resolve already froze
 	// for the refs the user typed. Both loads then read the same immutable objects,
 	// which is what makes this run's input provably the admitted one: a ref moving
@@ -568,6 +579,17 @@ func (a *Agent) newDiffProvider() *diff.Provider {
 			commit = s.ResolvedHead
 		case s.ResolvedBase != "":
 			from, to = s.ResolvedBase, s.ResolvedHead
+		}
+	}
+
+	if a.args.VCS == vcs.SVN {
+		switch {
+		case commit != "":
+			return diff.NewSVNCommitProvider(a.args.RepoDir, commit, a.args.SVNRunner)
+		case from != "" && to != "":
+			return diff.NewSVNProvider(a.args.RepoDir, from, to, a.args.SVNRunner)
+		default:
+			return diff.NewSVNWorkspaceProvider(a.args.RepoDir, a.args.SVNRunner)
 		}
 	}
 

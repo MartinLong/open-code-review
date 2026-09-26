@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/alibaba/open-code-review/internal/vcs"
 )
 
 const (
@@ -47,6 +49,10 @@ func (p *CodeSearchProvider) Execute(ctx context.Context, args map[string]any) (
 
 	if strings.TrimSpace(searchText) == "" {
 		return "Error: search_text is blank", nil
+	}
+
+	if p.FileReader.VCS == vcs.SVN {
+		return p.nativeSearch(ctx, searchText, caseSensitive, usePerlRegexp, patterns)
 	}
 
 	result, err := p.gitGrep(ctx, searchText, caseSensitive, usePerlRegexp, patterns)
